@@ -1,11 +1,20 @@
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::{Nvml, error::NvmlError};
-
 use sysinfo::{Pid, ProcessesToUpdate, System};
+
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    execute,
+    terminal::{Clear, ClearType},
+};
 
 use std::{
     collections::HashMap,
     io::{Write, stdout},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -14,54 +23,59 @@ fn main() -> Result<(), NvmlError> {
     let nvml = Nvml::init()?;
     let device = nvml.device_by_index(0)?;
     let mut sys = System::new();
+    let mut stdout = stdout();
 
-    loop {
-        // Clear screen and move cursor to top
-        print!("\x1B[2J\x1B[H");
-        stdout().flush().unwrap();
+    // Hide cursor and clear screen at start
+    execute!(stdout, Hide, Clear(ClearType::All)).unwrap();
 
+    // Setup ctrl-c handler with shared AtomicBool
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
+
+    while running.load(Ordering::SeqCst) {
         sys.refresh_processes(ProcessesToUpdate::All, true);
 
         let mut processes = HashMap::new();
 
-        // Collect compute processes
         for proc in device.running_compute_processes()? {
             processes.insert(proc.pid, proc.used_gpu_memory);
         }
 
-        // Collect compute + graphics processes
-
         for proc in device.running_graphics_processes()? {
             processes.entry(proc.pid).or_insert(proc.used_gpu_memory);
         }
-        // Get overall GPU utilization
-        let utilization = device.utilization_rates()?;
-        println!("Overall GPU utilization: {}%", utilization.gpu);
-        println!("---------------------------\n");
 
+        let utilization = device.utilization_rates()?;
         let mem_info = device.memory_info()?;
+
         let total_mib = mem_info.total / 1024 / 1024;
         let used_mib = mem_info.used / 1024 / 1024;
         let free_mib = mem_info.free / 1024 / 1024;
 
-        println!(
-            "GPU Memory Usage: {} MiB used / {} MiB total ({} MiB free)",
-            used_mib, total_mib, free_mib
-        );
-        println!("---------------------------\n");
+        // Framebuffer string
+        let mut buffer = String::new();
 
-        println!("Processes using GPU memory:");
-        println!("---------------------------\n");
-        println!("{:<8} {:<24} {:<16}", "PID", "NAME", "GPU Memory (MiB)");
+        buffer.push_str(&format!("Overall GPU utilization: {}%\n", utilization.gpu));
+        buffer.push_str("---------------------------\n\n");
+        buffer.push_str(&format!(
+            "GPU Memory Usage: {} MiB used / {} MiB total ({} MiB free)\n",
+            used_mib, total_mib, free_mib
+        ));
+        buffer.push_str("---------------------------\n\n");
+        buffer.push_str("Processes using GPU memory:\n");
+        buffer.push_str("---------------------------\n\n");
+        buffer.push_str(&format!(
+            "{:<8} {:<24} {:<16}\n",
+            "PID", "NAME", "GPU Memory (MiB)"
+        ));
 
         if processes.is_empty() {
-            println!("(No active GPU processes)");
+            buffer.push_str("(No active GPU processes)\n");
         } else {
-            // Initialize sysinfo once per loop
-
-            // sys.refresh_processes(ProcessesToUpdate::All, true);
-
-            // Convert to Vec and sort
             let mut sorted: Vec<_> = processes
                 .into_iter()
                 .map(|(pid, mem)| {
@@ -70,7 +84,6 @@ fn main() -> Result<(), NvmlError> {
                 })
                 .collect();
 
-            // Sort alphabetically by process name (case-insensitive)
             sorted.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
 
             for (pid, name, mem) in sorted {
@@ -78,12 +91,22 @@ fn main() -> Result<(), NvmlError> {
                     UsedGpuMemory::Used(bytes) => bytes / 1024 / 1024,
                     UsedGpuMemory::Unavailable => 0,
                 };
-                println!("{:<8} {:<24} {:<16}", pid, name, mem_mib);
+                buffer.push_str(&format!("{:<8} {:<24} {:<16}\n", pid, name, mem_mib));
             }
         }
 
+        // Clear screen and write buffer
+        execute!(stdout, MoveTo(0, 0), Clear(ClearType::All)).unwrap();
+        write!(stdout, "{}", buffer).unwrap();
+        stdout.flush().unwrap();
+
         thread::sleep(Duration::from_secs(1));
     }
+
+    // On exit, restore cursor visibility
+    execute!(stdout, Show).unwrap();
+
+    Ok(())
 }
 
 fn get_process_name(sys: &System, pid: u32) -> String {
