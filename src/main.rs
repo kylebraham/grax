@@ -1,8 +1,10 @@
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::{Nvml, error::NvmlError};
+
+use sysinfo::{Pid, ProcessesToUpdate, System};
+
 use std::{
     collections::HashMap,
-    fs,
     io::{Write, stdout},
     thread,
     time::Duration,
@@ -11,18 +13,23 @@ use std::{
 fn main() -> Result<(), NvmlError> {
     let nvml = Nvml::init()?;
     let device = nvml.device_by_index(0)?;
+    let mut sys = System::new();
 
     loop {
         // Clear screen and move cursor to top
         print!("\x1B[2J\x1B[H");
         stdout().flush().unwrap();
 
-        // Collect compute + graphics processes
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+
         let mut processes = HashMap::new();
 
+        // Collect compute processes
         for proc in device.running_compute_processes()? {
             processes.insert(proc.pid, proc.used_gpu_memory);
         }
+
+        // Collect compute + graphics processes
 
         for proc in device.running_graphics_processes()? {
             processes.entry(proc.pid).or_insert(proc.used_gpu_memory);
@@ -50,11 +57,15 @@ fn main() -> Result<(), NvmlError> {
         if processes.is_empty() {
             println!("(No active GPU processes)");
         } else {
+            // Initialize sysinfo once per loop
+
+            // sys.refresh_processes(ProcessesToUpdate::All, true);
+
             // Convert to Vec and sort
             let mut sorted: Vec<_> = processes
                 .into_iter()
                 .map(|(pid, mem)| {
-                    let name = get_process_name(pid);
+                    let name = get_process_name(&sys, pid);
                     (pid, name, mem)
                 })
                 .collect();
@@ -75,9 +86,9 @@ fn main() -> Result<(), NvmlError> {
     }
 }
 
-fn get_process_name(pid: u32) -> String {
-    fs::read_to_string(format!("/proc/{}/comm", pid))
-        .unwrap_or_else(|_| "unknown".to_string())
-        .trim()
-        .to_string()
+fn get_process_name(sys: &System, pid: u32) -> String {
+    let pid = Pid::from_u32(pid);
+    sys.process(pid)
+        .map(|p| p.name().to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
