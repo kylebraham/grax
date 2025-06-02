@@ -22,6 +22,7 @@ use std::{
 
 fn main() -> Result<(), NvmlError> {
     let nvml = Nvml::init()?;
+
     let device = nvml.device_by_index(0)?;
     let mut sys = System::new();
     let mut stdout = stdout();
@@ -41,41 +42,23 @@ fn main() -> Result<(), NvmlError> {
         sys.refresh_processes(ProcessesToUpdate::All, true);
 
         if let Ok(buffer) = get_metrics(&device, &sys) {
+            // Clear screen and write buffer
             execute!(stdout, MoveTo(0, 0), Clear(ClearType::All)).unwrap();
             write!(stdout, "{}", buffer).unwrap();
             stdout.flush().unwrap();
         }
-
-        // Clear screen and write buffer
-
         thread::sleep(Duration::from_secs(1));
     }
-
     // On exit, restore cursor visibility
     execute!(stdout, Show).unwrap();
-
     Ok(())
 }
+
 fn get_metrics(device: &Device, sys: &System) -> Result<String, NvmlError> {
     // Framebuffer string
     let mut buffer = String::new();
-
-    let mut processes = HashMap::new();
-
-    for proc in device.running_compute_processes()? {
-        processes.insert(proc.pid, proc.used_gpu_memory);
-    }
-
-    for proc in device.running_graphics_processes()? {
-        processes.entry(proc.pid).or_insert(proc.used_gpu_memory);
-    }
-
     let utilization = device.utilization_rates()?;
-    let mem_info = device.memory_info()?;
-
-    let total_mib = mem_info.total / 1024 / 1024;
-    let used_mib = mem_info.used / 1024 / 1024;
-    let free_mib = mem_info.free / 1024 / 1024;
+    let (total_mib, used_mib, free_mib) = get_gpu_memory_utilization(&device)?;
 
     buffer.push_str(&format!("Overall GPU utilization: {}%\n", utilization.gpu));
     buffer.push_str("---------------------------\n\n");
@@ -91,29 +74,21 @@ fn get_metrics(device: &Device, sys: &System) -> Result<String, NvmlError> {
         "PID", "NAME", "GPU Memory (MiB)"
     ));
 
-    if processes.is_empty() {
-        buffer.push_str("(No active GPU processes)\n");
-    } else {
-        let mut sorted: Vec<_> = processes
-            .into_iter()
-            .map(|(pid, mem)| {
-                let name = get_process_name(&sys, pid);
-                (pid, name, mem)
-            })
-            .collect();
-
-        sorted.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
-
-        for (pid, name, mem) in sorted {
-            let mem_mib = match mem {
-                UsedGpuMemory::Used(bytes) => bytes / 1024 / 1024,
-                UsedGpuMemory::Unavailable => 0,
-            };
-            buffer.push_str(&format!("{:<8} {:<24} {:<16}\n", pid, name, mem_mib));
-        }
-    }
+    get_gpu_processes(device, sys)?
+        .iter()
+        .for_each(|p| buffer.push_str(p));
 
     Ok(buffer)
+}
+
+fn get_gpu_memory_utilization(device: &Device) -> Result<(u64, u64, u64), NvmlError> {
+    let mem_info = device.memory_info()?;
+
+    let total_mib = mem_info.total / 1024 / 1024;
+    let used_mib = mem_info.used / 1024 / 1024;
+    let free_mib = mem_info.free / 1024 / 1024;
+
+    Ok((total_mib, used_mib, free_mib))
 }
 
 fn get_process_name(sys: &System, pid: u32) -> String {
@@ -121,4 +96,33 @@ fn get_process_name(sys: &System, pid: u32) -> String {
     sys.process(pid)
         .map(|p| p.name().to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn get_gpu_processes(device: &Device, sys: &System) -> Result<Vec<String>, NvmlError> {
+    let mut processes = HashMap::new();
+    let mut sorted_processes = Vec::new();
+    for proc in device.running_compute_processes()? {
+        processes.insert(proc.pid, proc.used_gpu_memory);
+    }
+
+    for proc in device.running_graphics_processes()? {
+        processes.entry(proc.pid).or_insert(proc.used_gpu_memory);
+    }
+
+    if !processes.is_empty() {
+        sorted_processes = processes
+            .into_iter()
+            .map(|(pid, mem)| {
+                let name = get_process_name(&sys, pid);
+                let mem = match mem {
+                    UsedGpuMemory::Used(bytes) => bytes / 1024 / 1024,
+                    UsedGpuMemory::Unavailable => 0,
+                };
+                format!("{:<8} {:<24} {:<16}\n", pid, name, mem)
+            })
+            .collect();
+        sorted_processes.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    }
+
+    Ok(sorted_processes)
 }
