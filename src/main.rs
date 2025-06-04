@@ -83,7 +83,27 @@ fn main() -> Result<(), NvmlError> {
             }
         }
         Some(Commands::Info) => {
-            println!("Getting GPU Info")
+            // println!("{:<15}: {:?}", "Brand", device.brand()?);
+
+            // println!("{:<15}: {}", "Name", device.name()?);
+            // println!(
+            //     "{:<15}:  {} (watts) ",
+            //     "Power Limit",
+            //     (device.enforced_power_limit()? / 1000)
+            // );
+
+            // let (total_mem, _, _) = get_gpu_memory_utilization(&device)?;
+            // println!("{:<15}:  {} (MiB)", "Total GPU Memory", total_mem);
+            println!("{:<16}: {:?}", "Brand", device.brand()?);
+            println!("{:<16}: {}", "Name", device.name()?);
+            println!(
+                "{:<16}: {} (watts)",
+                "Power Limit",
+                device.enforced_power_limit()? / 1000
+            );
+
+            let (total_mem, _, _) = get_gpu_memory_utilization(&device)?;
+            println!("{:<16}: {} (MiB)", "Total GPU Memory", total_mem);
         }
         None => {}
     }
