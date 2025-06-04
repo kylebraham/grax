@@ -1,3 +1,4 @@
+use clap::{Parser, Subcommand};
 use nvml_wrapper::Device;
 use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::{Nvml, error::NvmlError};
@@ -20,37 +21,73 @@ use std::{
     time::Duration,
 };
 
-fn main() -> Result<(), NvmlError> {
-    let nvml = Nvml::init()?;
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-    let device = nvml.device_by_index(0)?;
-    let mut sys = System::new();
+#[derive(Subcommand)]
+enum Commands {
+    /// Get gpu metric
+    Query {
+        /// Watch for GPU metric changes.
+        #[arg(short, long)]
+        watch: bool,
+    },
+    /// Displau GPU info
+    Info,
+}
+
+fn main() -> Result<(), NvmlError> {
+    let cli = Cli::parse();
     let mut stdout = stdout();
 
-    // Hide cursor and clear screen at start
-    execute!(stdout, Hide, Clear(ClearType::All)).unwrap();
+    let nvml = Nvml::init()?;
+    let device = nvml.device_by_index(0)?;
+    let mut sys = System::new();
 
-    // Setup ctrl-c handler with shared AtomicBool
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-    })
-    .expect("Error setting Ctrl-C handler");
+    match &cli.command {
+        Some(Commands::Query { watch }) => {
+            if *watch {
+                // Hide cursor and clear screen at start
+                execute!(stdout, Hide, Clear(ClearType::All)).unwrap();
 
-    while running.load(Ordering::SeqCst) {
-        sys.refresh_processes(ProcessesToUpdate::All, true);
+                // Setup ctrl-c handler with shared AtomicBool
+                let running = Arc::new(AtomicBool::new(true));
+                let r = running.clone();
+                ctrlc::set_handler(move || {
+                    r.store(false, Ordering::SeqCst);
+                })
+                .expect("Error setting Ctrl-C handler");
 
-        if let Ok(buffer) = get_metrics(&device, &sys) {
-            // Clear screen and write buffer
-            execute!(stdout, MoveTo(0, 0), Clear(ClearType::All)).unwrap();
-            write!(stdout, "{}", buffer).unwrap();
-            stdout.flush().unwrap();
+                while running.load(Ordering::SeqCst) {
+                    sys.refresh_processes(ProcessesToUpdate::All, true);
+
+                    if let Ok(buffer) = get_metrics(&device, &sys) {
+                        // Clear screen and write buffer
+                        execute!(stdout, MoveTo(0, 0), Clear(ClearType::All)).unwrap();
+                        write!(stdout, "{}", buffer).unwrap();
+                        stdout.flush().unwrap();
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                }
+                // On exit, restore cursor visibility
+                execute!(stdout, Show).unwrap();
+            } else {
+                if let Ok(buffer) = get_metrics(&device, &sys) {
+                    write!(stdout, "{}", buffer).unwrap();
+                    stdout.flush().unwrap();
+                }
+            }
         }
-        thread::sleep(Duration::from_secs(1));
+        Some(Commands::Info) => {
+            println!("Getting GPU Info")
+        }
+        None => {}
     }
-    // On exit, restore cursor visibility
-    execute!(stdout, Show).unwrap();
+
     Ok(())
 }
 
